@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Video Shrinker</title>
+<style>
+:root{--bg:#f5f5f7;--card:#fff;--tx:#1d1d1f;--mut:#6e6e73;--ac:#0a84ff;--ok:#30a46c;--bd:#d9d9de;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#000;--card:#1c1c1e;--tx:#f5f5f7;--mut:#98989f;--bd:#38383a}}
+:root[data-theme="dark"]{--bg:#000;--card:#1c1c1e;--tx:#f5f5f7;--mut:#98989f;--bd:#38383a}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+main{max-width:520px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:26px;margin:8px 0 4px}
+p.sub{color:var(--mut);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:16px;margin-bottom:14px}
+button,.pick{display:block;width:100%;border:0;border-radius:12px;padding:14px;font-size:17px;font-weight:600;background:var(--ac);color:#fff;text-align:center;cursor:pointer}
+button:disabled{opacity:.45}
+button.ok{background:var(--ok)}
+button.sec{background:transparent;color:var(--ac);border:1px solid var(--bd)}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+#src{position:absolute;left:0;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none}
+label{display:block;color:var(--mut);font-size:14px;margin:12px 0 6px}
+input[type=number],select{width:100%;padding:12px;font-size:17px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx)}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.bar{height:10px;background:var(--bd);border-radius:6px;overflow:hidden;margin:12px 0 6px}
+.bar>i{display:block;height:100%;width:0;background:var(--ac);transition:width .3s}
+.mut{color:var(--mut);font-size:14px}
+.big{font-size:28px;font-weight:700}
+video{width:100%;border-radius:12px;background:#000;margin-top:10px}
+canvas{display:none}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Video Shrinker</h1>
+  <p class="sub">Shrinks a video on your iPhone. Nothing is uploaded; it all happens in Safari.</p>
+
+  <div class="card">
+    <label class="pick" for="f" id="pickBtn">Choose video</label>
+    <input id="f" type="file" accept="video/*">
+    <div id="info" class="mut" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card hide" id="opts">
+    <label for="mb">Target size (MB)</label>
+    <input id="mb" type="number" inputmode="numeric" value="200" min="5">
+    <label for="res">Resolution</label>
+    <select id="res">
+      <option value="auto">Auto (best for the size)</option>
+      <option value="1080">1080p</option>
+      <option value="720">720p</option>
+      <option value="540">540p</option>
+    </select>
+    <div id="plan" class="mut" style="margin:12px 0"></div>
+    <button id="go">Start shrinking</button>
+  </div>
+
+  <div class="card hide" id="prog">
+    <div id="pt">Working…</div>
+    <div class="bar"><i id="pb"></i></div>
+    <div class="mut" id="ps"></div>
+    <p class="mut" style="margin:10px 0 0">Keep this screen open and Safari in front. It runs at the video’s normal speed, so a 5-minute video takes about 5 minutes.</p>
+    <button class="sec" id="stop" style="margin-top:12px">Cancel</button>
+  </div>
+
+  <div class="card hide" id="done">
+    <div class="mut">Done</div>
+    <div class="big" id="dsize"></div>
+    <div class="mut" id="dnote"></div>
+    <video id="pv" controls playsinline></video>
+    <button class="ok" id="save" style="margin-top:12px">Save video</button>
+    <div class="mut" id="smsg" style="margin-top:8px"></div>
+  </div>
+
+  <video id="src" playsinline webkit-playsinline preload="auto"></video>
+  <canvas id="cv"></canvas>
+</main>
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var src=$('src'),cv=$('cv'),ctx=cv.getContext('2d',{alpha:false});
+  var file=null,url=null,dur=0,vw=0,vh=0,rec=null,chunks=[],cancelled=false,outBlob=null,outExt='mp4',wake=null,ac=null,raf=null;
+  var AUDIO=96000,FPS=30;
+
+  function mb(b){return (b/1048576).toFixed(b>1.05e8?0:1)+' MB'}
+  function fmtT(s){s=Math.round(s);return Math.floor(s/60)+':'+('0'+s%60).slice(-2)}
+
+  function plan(){
+    var target=parseFloat($('mb').value)||200;
+    var bits=target*1048576*8*0.92;
+    var vbr=Math.max(150000,bits/dur-AUDIO);
+    var sel=$('res').value,short=Math.min(vw,vh),long=Math.max(vw,vh),tShort;
+    if(sel==='auto'){
+      var px=vbr/(FPS*0.07);           // pixels per frame the bitrate can support
+      var ratio=long/short;
+      tShort=Math.sqrt(px/ratio);
+      tShort=Math.min(tShort,short,1080);
+      tShort=Math.max(tShort,360);
+    }else{tShort=Math.min(parseInt(sel,10),short)}
+    var sc=tShort/short;
+    var w=Math.round(vw*sc/2)*2,h=Math.round(vh*sc/2)*2;
+    return {vbr:Math.round(vbr),w:w,h:h,target:target};
+  }
+  function showPlan(){
+    if(!dur)return;
+    var p=plan();
+    var warn=p.vbr<1500000?' Quality will be softer at this size.':'';
+    $('plan').textContent='Output: '+p.w+'×'+p.h+' at about '+(p.vbr/1e6).toFixed(1)+' Mbps.'+warn;
+  }
+
+  $('f').addEventListener('change',function(e){
+    var fl=e.target.files&&e.target.files[0];if(!fl)return;
+    file=fl;if(url)URL.revokeObjectURL(url);
+    url=URL.createObjectURL(fl);
+    $('info').textContent='Selected '+fl.name+' ('+mb(fl.size)+'). Reading video…';
+    ['opts','prog','done'].forEach(function(i){$(i).classList.add('hide')});
+    var ready=false;
+    function onReady(){
+      if(ready||!src.videoWidth||!isFinite(src.duration))return;
+      ready=true;
+      dur=src.duration;vw=src.videoWidth;vh=src.videoHeight;
+      $('info').textContent=fl.name+' · '+mb(fl.size)+' · '+vw+'×'+vh+' · '+fmtT(dur);
+      $('opts').classList.remove('hide');
+      showPlan();
+    }
+    src.onloadedmetadata=onReady;src.onloadeddata=onReady;src.oncanplay=onReady;
+    src.onerror=function(){$('info').textContent='Safari could not read this video. Try another file.'};
+    src.muted=false;src.src=url;src.load();
+    var tries=0,iv=setInterval(function(){
+      onReady();tries++;
+      if(ready){clearInterval(iv)}
+      else if(tries>20){clearInterval(iv);$('info').textContent='Still can’t read the video. Try a shorter clip first, or choose it again.'}
+    },1000);
+  });
+  $('mb').addEventListener('input',showPlan);
+  $('res').addEventListener('change',showPlan);
+
+  function pickMime(){
+    var c=['video/mp4;codecs=avc1.640028,mp4a.40.2','video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+    for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}
+    return '';
+  }
+
+  async function start(){
+    if(!window.MediaRecorder){$('info').textContent='This browser can’t record video. Update iOS to 14.5 or later.';return}
+    var p=plan(),mime=pickMime();
+    outExt=mime.indexOf('webm')>-1?'webm':'mp4';
+    cancelled=false;chunks=[];outBlob=null;
+    cv.width=p.w;cv.height=p.h;
+    $('opts').classList.add('hide');$('done').classList.add('hide');$('prog').classList.remove('hide');
+    $('pt').textContent='Shrinking…';$('pb').style.width='0%';$('ps').textContent='';
+
+    var stream=cv.captureStream(FPS);
+    try{
+      ac=ac||new (window.AudioContext||window.webkitAudioContext)();
+      if(ac.state==='suspended')await ac.resume();
+      if(!src._node)src._node=ac.createMediaElementSource(src);
+      var dest=ac.createMediaStreamDestination();
+      src._node.disconnect();src._node.connect(dest);
+      dest.stream.getAudioTracks().forEach(function(t){stream.addTrack(t)});
+    }catch(err){/* no audio track; continue video-only */}
+
+    var opt={videoBitsPerSecond:p.vbr,audioBitsPerSecond:AUDIO};
+    if(mime)opt.mimeType=mime;
+    rec=new MediaRecorder(stream,opt);
+    rec.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
+    rec.onstop=finish;
+    try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){}
+
+    src.currentTime=0;
+    await new Promise(function(r){var t=setTimeout(r,800);src.onseeked=function(){clearTimeout(t);r()}});
+    rec.start(1000);
+    try{await src.play()}catch(e){$('pt').textContent='Tap Start again; Safari blocked playback.';return}
+    t0=Date.now();
+    loop();
+  }
+  var t0=0;
+  function loop(){
+    if(src.paused&&!src.ended){ // Safari paused it (e.g. app switched)
+      $('pt').textContent='Paused. Bring Safari to the front and it will continue.';
+      src.play().catch(function(){});
+    }
+    ctx.drawImage(src,0,0,cv.width,cv.height);
+    var pc=dur?Math.min(100,src.currentTime/dur*100):0;
+    $('pb').style.width=pc.toFixed(1)+'%';
+    var el=(Date.now()-t0)/1000;
+    $('ps').textContent=Math.round(pc)+'% · '+fmtT(src.currentTime)+' of '+fmtT(dur);
+    if(src.ended||cancelled||src.currentTime>=dur-0.05){
+      if(rec&&rec.state!=='inactive')rec.stop();
+      return;
+    }
+    if(src.requestVideoFrameCallback)src.requestVideoFrameCallback(loop);else raf=requestAnimationFrame(loop);
+  }
+  src.addEventListener('ended',function(){if(rec&&rec.state!=='inactive'&&!cancelled)rec.stop()});
+
+  function finish(){
+    try{src.pause()}catch(e){}
+    if(wake){try{wake.release()}catch(e){}wake=null}
+    if(cancelled){$('prog').classList.add('hide');$('opts').classList.remove('hide');return}
+    outBlob=new Blob(chunks,{type:outExt==='mp4'?'video/mp4':'video/webm'});
+    $('prog').classList.add('hide');$('done').classList.remove('hide');
+    $('dsize').textContent=mb(outBlob.size)+'  (was '+mb(file.size)+')';
+    var tgt=plan().target*1048576;
+    $('dnote').textContent=outBlob.size>tgt*1.1?'A bit over your target. Lower the target size and run again to get closer.':'Within your target.';
+    var pv=$('pv');pv.src=URL.createObjectURL(outBlob);
+    $('smsg').textContent='';
+  }
+  $('go').addEventListener('click',start);
+  $('stop').addEventListener('click',function(){cancelled=true;try{src.pause()}catch(e){}if(rec&&rec.state!=='inactive')rec.stop();else finish()});
+
+  $('save').addEventListener('click',async function(){
+    if(!outBlob)return;
+    var name=(file.name.replace(/\.[^.]+$/,'')||'video')+'-small.'+outExt;
+    try{
+      var fl=new File([outBlob],name,{type:outBlob.type});
+      if(navigator.canShare&&navigator.canShare({files:[fl]})){await navigator.share({files:[fl]});return}
+    }catch(e){}
+    var l=document.createElement('a');l.href=URL.createObjectURL(outBlob);l.download=name;document.body.appendChild(l);l.click();l.remove();$('smsg').textContent='If nothing happened, press and hold the preview video above and choose Save.';
+  });
+})();
+</script>
+</body>
+</html>
